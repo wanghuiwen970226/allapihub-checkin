@@ -95,6 +95,7 @@ def extract_config():
         site_type = extract("site_type")
         token = extract("access_token")
         username = extract("username")
+        user_id = extract("id")
         disabled = extract_bool("disabled")
         detect = extract_bool("enableDetection")
         auto = extract_bool("autoCheckInEnabled")
@@ -115,6 +116,7 @@ def extract_config():
                 "name": site_name,
                 "url": site_url.rstrip("/"),
                 "token": token or "",
+                "user_id": user_id or "",
                 "type": mapped_type,
                 "username": username or "",
                 "detection_enabled": detect if detect is not None else False,
@@ -163,14 +165,16 @@ def main():
     for s in enabled + auto_enabled:
         if s["url"] not in seen and s["token"]:
             seen.add(s["url"])
-            checkin_config.append(
-                {
-                    "name": s["name"],
-                    "url": s["url"],
-                    "token": s["token"],
-                    "type": s["type"],
-                }
-            )
+            entry = {
+                "name": s["name"],
+                "url": s["url"],
+                "token": s["token"],
+                "type": s["type"],
+            }
+            # 只有 new-api 类型需要 user_id (New-API-User header)
+            if s["user_id"] and s["type"] in ("new-api", "sub2api"):
+                entry["user_id"] = s["user_id"]
+            checkin_config.append(entry)
 
     config_json = json.dumps(checkin_config, ensure_ascii=False, indent=2)
     print()

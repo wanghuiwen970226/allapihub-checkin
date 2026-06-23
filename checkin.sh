@@ -9,8 +9,8 @@
 #
 # SITES_JSON 格式:
 #   [
-#     {"name":"站点名","url":"https://example.com","token":"sk-xxx","type":"new-api"},
-#     {"name":"站点2","url":"https://site2.com","token":"sk-yyy","type":"new-api"}
+#     {"name":"站点名","url":"https://example.com","token":"sk-xxx","user_id":"12345","type":"new-api"},
+#     {"name":"站点2","url":"https://site2.com","token":"sk-yyy","user_id":"67890","type":"new-api"}
 #   ]
 # ============================================================
 
@@ -66,6 +66,7 @@ for site in sites:
     name = site.get('name', 'Unknown')
     url = site.get('url', '').rstrip('/')
     token = site.get('token', '')
+    user_id = site.get('user_id', '')
     stype = site.get('type', 'new-api')
 
     print(f'--- {name} ({url}) ---')
@@ -80,7 +81,8 @@ for site in sites:
         endpoint = '/api/user/sign_in'
         headers = {
             'Content-Type': 'application/json',
-            'X-Requested-With': 'XMLHttpRequest'
+            'X-Requested-With': 'XMLHttpRequest',
+            'Cookie': f'access_token={token}'
         }
     elif stype == 'veloera':
         endpoint = '/api/user/check_in'
@@ -101,23 +103,33 @@ for site in sites:
             'Content-Type': 'application/json',
             'Authorization': f'Bearer {token}'
         }
+        # New API 站点需要 user_id 作为 New-API-User 头
+        if user_id:
+            headers['New-API-User'] = user_id
 
     checkin_url = f'{url}{endpoint}'
 
     try:
-        # 先检查今日是否已签到
-        status_url = f'{url}/api/user/checkin?month={month}'
-        try:
-            status_req = urllib.request.Request(status_url, headers=headers, method='GET')
-            with urllib.request.urlopen(status_req, context=ssl_ctx, timeout=15) as resp:
-                status_data = json.loads(resp.read().decode())
-                if status_data.get('stats', {}).get('checked_in_today', False):
-                    print(f'  [SKIP] 今日已签到，跳过')
-                    results['already'] += 1
-                    continue
-        except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
-            # 状态检查失败，继续尝试签到
-            pass
+        # 先检查今日是否已签到（仅 new-api 类型支持状态查询）
+        if stype in ('new-api', 'sub2api', 'wong'):
+            status_url = f'{url}/api/user/checkin?month={month}'
+            status_headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {token}'
+            }
+            if user_id and stype != 'wong':
+                status_headers['New-API-User'] = user_id
+            try:
+                status_req = urllib.request.Request(status_url, headers=status_headers, method='GET')
+                with urllib.request.urlopen(status_req, context=ssl_ctx, timeout=15) as resp:
+                    status_data = json.loads(resp.read().decode())
+                    if status_data.get('stats', {}).get('checked_in_today', False):
+                        print(f'  [SKIP] 今日已签到，跳过')
+                        results['already'] += 1
+                        continue
+            except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
+                # 状态检查失败，继续尝试签到
+                pass
 
         # 执行签到
         req_body = b'{}'
