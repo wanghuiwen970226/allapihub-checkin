@@ -1,0 +1,6 @@
+# 站点配置文件包含敏感 token，禁止提交
+sites_config.json
+
+# Python 缓存
+__pycache__/
+*.pyc

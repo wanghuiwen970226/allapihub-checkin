@@ -1,0 +1,37 @@
+name: All API Hub 每日签到
+
+on:
+  schedule:
+    # 每天 UTC 02:00 = 北京时间 10:00
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # 支持手动触发
+    inputs:
+      debug:
+        description: 'Debug mode'
+        required: false
+        default: 'false'
+
+jobs:
+  checkin:
+    name: 执行签到
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 执行签到
+        id: checkin
+        run: |
+          chmod +x checkin.sh
+          ./checkin.sh
+        env:
+          SITES_JSON: ${{ secrets.SITES_JSON }}
+
+      - name: 发送通知（有失败时）
+        if: failure()
+        run: |
+          echo "::warning::部分站点签到失败，请检查 SITES_JSON 配置"
+          echo "成功: ${{ steps.checkin.outputs.success }}"
+          echo "失败: ${{ steps.checkin.outputs.failed }}"
