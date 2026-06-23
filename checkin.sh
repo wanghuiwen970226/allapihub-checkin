@@ -54,13 +54,30 @@ echo -e "共 ${SITE_COUNT} 个站点配置\n"
 
 # 遍历每个站点执行签到
 echo "$SITES_JSON" | python3 -c "
-import sys, json, urllib.request, urllib.error, ssl, os
+import sys, json, os
+import cloudscraper
+from datetime import datetime
 
 sites = json.load(sys.stdin)
-ssl_ctx = ssl.create_default_context()
+scraper = cloudscraper.create_scraper(
+    browser={'browser': 'chrome', 'platform': 'darwin', 'mobile': False},
+    delay=10
+)
 
-month = __import__('datetime').datetime.now().strftime('%Y-%m')
+month = datetime.now().strftime('%Y-%m')
 results = {'total': len(sites), 'success': 0, 'failed': 0, 'skipped': 0, 'already': 0}
+
+def req_get(url, headers, timeout=15):
+    try:
+        return scraper.get(url, headers=headers, timeout=timeout)
+    except Exception as e:
+        return None
+
+def req_post(url, data, headers, timeout=30):
+    try:
+        return scraper.post(url, data=data, headers=headers, timeout=timeout)
+    except Exception as e:
+        return None
 
 for site in sites:
     name = site.get('name', 'Unknown')
@@ -82,116 +99,115 @@ for site in sites:
         headers = {
             'Content-Type': 'application/json',
             'X-Requested-With': 'XMLHttpRequest',
-            'Cookie': f'access_token={token}'
+            'Cookie': f'access_token={token}',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
     elif stype == 'veloera':
         endpoint = '/api/user/check_in'
         headers = {
             'Content-Type': 'application/json',
-            'Authorization': f'Bearer {token}'
-        }
-    elif stype == 'wong':
-        endpoint = '/api/user/checkin'
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {token}'
+            'Authorization': f'Bearer {token}',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
     else:
         # new-api / sub2api / 默认
         endpoint = '/api/user/checkin'
         headers = {
             'Content-Type': 'application/json',
-            'Authorization': f'Bearer {token}'
+            'Authorization': f'Bearer {token}',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         # New API 站点需要 user_id 作为 New-API-User 头
         if user_id:
             headers['New-API-User'] = user_id
+            # 扩展会发送多个 user-id 相关头，有些站点需要其中之一
+            headers['X-Api-User'] = user_id
+            headers['User-id'] = user_id
+        # 扩展标识头，部分站点需要
+        headers['All-API-Hub'] = 'true'
+        headers['All-API-Hub-Cookie-Auth'] = 'token'
 
     checkin_url = f'{url}{endpoint}'
 
-    try:
-        # 先检查今日是否已签到（仅 new-api 类型支持状态查询）
-        if stype in ('new-api', 'sub2api', 'wong'):
-            status_url = f'{url}/api/user/checkin?month={month}'
-            status_headers = {
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {token}'
-            }
-            if user_id and stype != 'wong':
-                status_headers['New-API-User'] = user_id
+    # 先检查今日是否已签到（仅 new-api 类型支持状态查询）
+    already_checked_in = False
+    checkin_nonce = None
+    if stype in ('new-api', 'sub2api'):
+        status_url = f'{url}/api/user/checkin?month={month}'
+        status_headers = dict(headers)
+        resp = req_get(status_url, status_headers)
+        if resp and resp.status_code == 200:
             try:
-                status_req = urllib.request.Request(status_url, headers=status_headers, method='GET')
-                with urllib.request.urlopen(status_req, context=ssl_ctx, timeout=15) as resp:
-                    status_data = json.loads(resp.read().decode())
-                    if status_data.get('stats', {}).get('checked_in_today', False):
-                        print(f'  [SKIP] 今日已签到，跳过')
-                        results['already'] += 1
-                        continue
-            except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
-                # 状态检查失败，继续尝试签到
+                data = resp.json()
+                if data.get('data', {}).get('stats', {}).get('checked_in_today', False):
+                    already_checked_in = True
+                # 有些站点需要 checkin_nonce 签名（如 Huainova）
+                cnonce = data.get('data', {}).get('checkin_nonce')
+                if cnonce:
+                    checkin_nonce = cnonce
+            except:
                 pass
 
-        # 执行签到
-        req_body = b'{}'
-        if stype == 'anyrouter':
-            req_body = b'{}'
+    if already_checked_in:
+        print(f'  [OK] 今日已签到')
+        results['already'] += 1
+        print()
+        continue
 
-        req = urllib.request.Request(
-            checkin_url,
-            data=req_body,
-            headers=headers,
-            method='POST'
-        )
+    # 执行签到
+    post_body = b'{}'
+    if checkin_nonce:
+        post_body = json.dumps({'checkin_nonce': checkin_nonce}).encode()
+    resp = req_post(checkin_url, post_body, headers)
+    if resp is None:
+        print(f'  [FAIL] 请求失败（网络/超时）')
+        results['failed'] += 1
+        print()
+        continue
 
-        with urllib.request.urlopen(req, context=ssl_ctx, timeout=30) as resp:
-            body = resp.read().decode()
-            result = json.loads(body)
-
-        msg = result.get('message', '')
-        msg_lower = msg.lower()
-
-        if result.get('success') and ('success' in msg_lower or '签到成功' in msg):
-            print(f'  [OK] 签到成功!')
-            results['success'] += 1
-        elif result.get('success') and ('checked' in msg_lower or '已签到' in msg):
-            print(f'  [OK] 今日已签到')
-            results['already'] += 1
-        elif 'already' in msg_lower or 'checked' in msg_lower or '已签到' in msg:
-            print(f'  [OK] 今日已签到')
-            results['already'] += 1
-        elif result.get('data', {}).get('checked_in') == True:
-            print(f'  [OK] 今日已签到')
-            results['already'] += 1
-        elif result.get('data', {}).get('enabled') == False:
-            print(f'  [WARN] 站点已关闭签到功能')
-            results['skipped'] += 1
-        else:
-            print(f'  [FAIL] {msg[:80]}')
-            results['failed'] += 1
-
-    except urllib.error.HTTPError as e:
-        if e.code == 400:
-            body = e.read().decode()
-            if 'already' in body.lower() or 'checked' in body.lower():
+    try:
+        result = resp.json()
+    except:
+        if resp.status_code == 400:
+            body_text = resp.text.lower()
+            if 'already' in body_text or 'checked' in body_text:
                 print(f'  [OK] 今日已签到 (400 + already)')
                 results['already'] += 1
             else:
-                print(f'  [FAIL] HTTP {e.code}: {body[:80]}')
+                print(f'  [FAIL] HTTP 400: {resp.text[:80]}')
                 results['failed'] += 1
-        elif e.code == 429:
+        elif resp.status_code == 429:
             print(f'  [FAIL] 请求过于频繁 (429)')
             results['failed'] += 1
-        else:
-            print(f'  [FAIL] HTTP {e.code}')
+        elif resp.status_code in (401, 403):
+            print(f'  [FAIL] HTTP {resp.status_code}')
             results['failed'] += 1
-    except urllib.error.URLError as e:
-        print(f'  [FAIL] 网络错误: {e.reason}')
-        results['failed'] += 1
-    except json.JSONDecodeError:
-        print(f'  [FAIL] 响应解析失败')
-        results['failed'] += 1
-    except Exception as e:
-        print(f'  [FAIL] {str(e)[:80]}')
+        else:
+            print(f'  [FAIL] HTTP {resp.status_code}: 响应解析失败')
+            results['failed'] += 1
+        print()
+        continue
+
+    msg = result.get('message', '')
+    msg_lower = msg.lower()
+
+    if result.get('success') and ('success' in msg_lower or '签到成功' in msg):
+        print(f'  [OK] 签到成功!')
+        results['success'] += 1
+    elif result.get('success') and ('checked' in msg_lower or '已签到' in msg):
+        print(f'  [OK] 今日已签到')
+        results['already'] += 1
+    elif 'already' in msg_lower or 'checked' in msg_lower or '已签到' in msg:
+        print(f'  [OK] 今日已签到')
+        results['already'] += 1
+    elif result.get('data', {}).get('checked_in') == True:
+        print(f'  [OK] 今日已签到')
+        results['already'] += 1
+    elif result.get('data', {}).get('enabled') == False:
+        print(f'  [WARN] 站点已关闭签到功能')
+        results['skipped'] += 1
+    else:
+        print(f'  [FAIL] {msg[:80]}')
         results['failed'] += 1
 
     print()
